@@ -17,6 +17,17 @@ model_urls = {
     "mobilenet_v3_small": "https://download.pytorch.org/models/mobilenet_v3_small-047dcff4.pth",
 }
 
+class Hardswish(nn.Module):
+    """
+    Export-friendly version of nn.Hardswish()
+    """
+    def __init__(self, inplace : bool = False) -> None:
+        self.inplace = inplace
+        super().__init__()
+
+    def forward(self, x):
+        return x * F.hardtanh(x + 3, 0., 6.) / 6.
+
 def _make_divisible(v: float, divisor: int, min_value: Optional[int] = None) -> int:
     """
     This function is taken from the original tf repo.
@@ -75,7 +86,8 @@ class SqueezeExcitation(nn.Module):
         scale = self.fc1(scale)
         scale = self.relu(scale)
         scale = self.fc2(scale)
-        return F.hardsigmoid(scale, inplace=inplace)
+        return F.hardtanh(scale + 3, 0., 6., inplace=inplace) / 6.
+        #return F.hardsigmoid(scale, inplace=inplace)
 
     def forward(self, input: Tensor) -> Tensor:
         scale = self._scale(input, True)
@@ -111,7 +123,7 @@ class InvertedResidual(nn.Module):
         self.use_res_connect = cnf.stride == 1 and cnf.input_channels == cnf.out_channels
 
         layers: List[nn.Module] = []
-        activation_layer = nn.Hardswish if cnf.use_hs else nn.ReLU
+        activation_layer = Hardswish if cnf.use_hs else nn.ReLU
 
         # expand
         if cnf.expanded_channels != cnf.input_channels:
@@ -150,7 +162,8 @@ class MobileNetV3(nn.Module):
             num_classes: int = 1000,
             block: Optional[Callable[..., nn.Module]] = None,
             norm_layer: Optional[Callable[..., nn.Module]] = None,
-            is_reengineering: bool = False
+            is_reengineering: bool = False,
+            num_classes_in_super: int = -1
     ) -> None:
         """
         MobileNet V3 main class
@@ -202,6 +215,15 @@ class MobileNetV3(nn.Module):
             MaskLinear(last_channel, num_classes, is_reengineering=is_reengineering),
         )
 
+        self.is_reengineering = is_reengineering
+        self.num_classes_in_super = num_classes_in_super
+        if is_reengineering:
+            assert num_classes_in_super > 0
+            self.module_head = nn.Sequential(
+                nn.ReLU(inplace=True),
+                nn.Linear(num_classes, num_classes_in_super)
+            )
+
         for m in self.modules():
             if isinstance(m, MaskConv):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out')
@@ -221,11 +243,34 @@ class MobileNetV3(nn.Module):
         x = torch.flatten(x, 1)
 
         x = self.classifier(x)
-
+        
+        if hasattr(self, 'module_head'):
+            x = self.module_head(x)
         return x
 
     def forward(self, x: Tensor) -> Tensor:
         return self._forward_impl(x)
+
+    def get_masks(self):
+        masks = {k: v for k, v in self.state_dict().items() if 'mask' in k}
+        return masks
+
+    def count_weight_ratio(self):
+        masks = []
+        for n, layer in self.named_modules():
+            if hasattr(layer, 'weight_mask'):
+                masks.append(torch.flatten(layer.weight_mask))
+                if layer.bias_mask is not None:
+                    masks.append(torch.flatten(layer.bias_mask))
+
+        masks = torch.cat(masks, dim=0)
+        bin_masks = Binarization.apply(masks)
+        weight_ratio = torch.mean(bin_masks)
+        return weight_ratio
+
+    def get_module_head(self):
+        head = {k: v for k, v in self.state_dict().items() if 'module_head' in k}
+        return head
 
 
 def _mobilenet_v3_conf(arch: str, params: Dict[str, Any]):
@@ -283,18 +328,22 @@ def _mobilenet_v3_model(
     last_channel: int,
     pretrained: bool,
     progress: bool,
+    is_reengineering: bool,
+    num_classes_in_super: int,
     **kwargs: Any
 ):
-    model = MobileNetV3(inverted_residual_setting, last_channel, **kwargs)
+    model = MobileNetV3(inverted_residual_setting, last_channel, is_reengineering=is_reengineering, num_classes_in_super=num_classes_in_super, **kwargs)
     if pretrained:
         if model_urls.get(arch, None) is None:
             raise ValueError("No checkpoint is available for model type {}".format(arch))
         state_dict = load_state_dict_from_url(model_urls[arch], progress=progress)
-        model.load_state_dict(state_dict)
+        model_params = model.state_dict()
+        model_params.update(state_dict)
+        model.load_state_dict(model_params)
     return model
 
 
-def mobilenet_v3_large(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> MobileNetV3:
+def mobilenet_v3_large(pretrained: bool = False, progress: bool = True, is_reengineering: bool = False, num_classes_in_super: int = -1, **kwargs: Any) -> MobileNetV3:
     """
     Constructs a large MobileNetV3 architecture from
     `"Searching for MobileNetV3" <https://arxiv.org/abs/1905.02244>`_.
@@ -305,10 +354,10 @@ def mobilenet_v3_large(pretrained: bool = False, progress: bool = True, **kwargs
     """
     arch = "mobilenet_v3_large"
     inverted_residual_setting, last_channel = _mobilenet_v3_conf(arch, kwargs)
-    return _mobilenet_v3_model(arch, inverted_residual_setting, last_channel, pretrained, progress, **kwargs)
+    return _mobilenet_v3_model(arch, inverted_residual_setting, last_channel, pretrained, progress, is_reengineering = is_reengineering, num_classes_in_super = num_classes_in_super, **kwargs)
 
 
-def mobilenet_v3_small(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> MobileNetV3:
+def mobilenet_v3_small(pretrained: bool = False, progress: bool = True, is_reengineering: bool = False, num_classes_in_super: int = -1, **kwargs: Any) -> MobileNetV3:
     """
     Constructs a small MobileNetV3 architecture from
     `"Searching for MobileNetV3" <https://arxiv.org/abs/1905.02244>`_.
@@ -319,4 +368,4 @@ def mobilenet_v3_small(pretrained: bool = False, progress: bool = True, **kwargs
     """
     arch = "mobilenet_v3_small"
     inverted_residual_setting, last_channel = _mobilenet_v3_conf(arch, kwargs)
-    return _mobilenet_v3_model(arch, inverted_residual_setting, last_channel, pretrained, progress, **kwargs)
+    return _mobilenet_v3_model(arch, inverted_residual_setting, last_channel, pretrained, progress, is_reengineering=is_reengineering, num_classes_in_super=num_classes_in_super, **kwargs)

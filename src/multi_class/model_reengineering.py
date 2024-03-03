@@ -9,17 +9,16 @@ sys.path.append('../..')
 from multi_class.reengineer import Reengineer
 from multi_class.datasets.dataset_loader import load_dataset
 from multi_class.config import load_config
-from multi_class.models.resnet20 import cifar100_resnet20 as resnet20
-from multi_class.models.resnet50 import resnet50
 from multi_class.models.mlpmixer import mlpmixer
 from multi_class.models.densenet import densenet121
 from multi_class.models.alexnet import alexnet
+from multi_class.models.mobilenetv3 import mobilenet_v3_small
 from tqdm import tqdm
 
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', type=str, choices=['resnet20', 'resnet50', 'mlpmixer', 'densenet121', 'alexnet'], required=True)
+    parser.add_argument('--model', type=str, choices=['mlpmixer', 'densenet121', 'alexnet', 'mobilenet_v3_small'], required=True)
     parser.add_argument('--dataset', type=str, choices=['cifar100', 'imagenet'], required=True)
     parser.add_argument('--superclass_type', type=str, choices=['predefined', 'random'], default='predefined')
     parser.add_argument('--target_superclass_idx', type=int, default=-1)
@@ -88,15 +87,13 @@ def eval_pretrained_model():
 
 
 def main():
-    if args.model == 'resnet20':
-        assert args.dataset == 'cifar100'
-    elif args.model == 'resnet50':
-        assert args.dataset == 'imagenet'
-    elif args.model == 'mlpmixer':
+    if args.model == 'mlpmixer':
         assert args.dataset == 'imagenet'
     elif args.model == 'densenet121':
         assert args.dataset == 'imagenet'
     elif args.model == 'alexnet':
+        assert args.dataset == 'imagenet'
+    elif args.model == 'mobilenet_v3_small':
         assert args.dataset == 'imagenet'
     else:
         raise ValueError
